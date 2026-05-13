@@ -13,37 +13,6 @@ Track per-token injuries with severity, complications, treatment status, and des
 
 ---
 
-## Setup & Hosting
-
-This extension must be served over HTTPS. The easiest options:
-
-### Option A — Netlify Drop (free, no account needed)
-1. Go to https://app.netlify.com/drop
-2. Drag the entire `injury-tracker/` folder onto the page.
-3. Copy the URL Netlify gives you (e.g. `https://random-name.netlify.app`).
-
-### Option B — GitHub Pages
-1. Push this folder to a GitHub repo.
-2. Enable GitHub Pages (Settings → Pages → Deploy from branch → `main / root`).
-3. Your URL will be `https://<you>.github.io/<repo>/`.
-
-### Option C — Local dev with `npx serve`
-```bash
-cd injury-tracker
-npx serve . -l 3000
-# Then use an ngrok tunnel for HTTPS: npx ngrok http 3000
-```
-
----
-
-## Loading into Owlbear Rodeo
-1. Open any room in Owlbear Rodeo.
-2. Click the puzzle-piece **Extensions** icon (top left).
-3. Paste your manifest URL: `https://your-host.com/manifest.json`
-4. Click **Add**.
-
----
-
 ## Using the Extension
 - **Right-click any character token** → choose **Injuries**.
 - Click any slot to open the edit modal.
