@@ -1,23 +1,20 @@
 <!DOCTYPE html>
 <html>
-<head><title>Injury Tracker</title></head>
+<head><title>Injury Tracker Background</title></head>
 <body>
 <script type="module">
 import OBR from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2.2.0/+esm";
 
 const EXT_ID = "com.injury-tracker";
-const BASE_URL = new URL(".", import.meta.url).href;
+const BASE_URL = "https://p-lange.github.io/injury-tracker";
 
 OBR.onReady(() => {
   OBR.contextMenu.create({
     id: `${EXT_ID}/context-menu`,
     icons: [
       {
-        icon: `${BASE_URL}icon.svg`,
+        icon: `${BASE_URL}/icon.svg`,
         label: "Injuries",
-        filter: {
-          every: [{ key: "layer", value: "CHARACTER" }],
-        },
       },
     ],
     async onClick(context, elementId) {
@@ -26,7 +23,7 @@ OBR.onReady(() => {
 
       OBR.popover.open({
         id: `${EXT_ID}/popover`,
-        url: `${BASE_URL}popover.html?tokenId=${encodeURIComponent(tokenId)}`,
+        url: `${BASE_URL}/popover.html?tokenId=${encodeURIComponent(tokenId)}`,
         height: 540,
         width: 420,
         anchorElementId: elementId,
