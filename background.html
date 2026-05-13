@@ -9,22 +9,27 @@ const EXT_ID  = "com.injury-tracker";
 const EXT_KEY = "com.injury-tracker/injuries";
 const BASE_URL = "https://p-lange.github.io/injury-tracker";
 
-// ── Status helpers ─────────────────────────────────────────────────────
+// ── Colors (matching popover) ──────────────────────────────────────────
+const COLORS = {
+  strain:   "#16a34a", // green
+  serious:  "#ca8a04", // yellow
+  critical: "#ea580c", // orange
+  lethal:   "#dc2626", // red
+  dead:     "#7f1d1d", // dark red
+};
 
+// ── Status from injury data ────────────────────────────────────────────
 function getStatus(injuries) {
   if (!injuries) return null;
-  if (injuries.dead) return { word: "☠ Dead", color: "#dc2626" };
+  if (injuries.dead) return { word: "☠ Dead", color: COLORS.dead };
 
-  const lethal   = (injuries.lethal   || []).some(s => s.desc || (s.complications||[]).length);
-  const critical = (injuries.critical || []).some(s => s.desc || (s.complications||[]).length);
-  const serious  = (injuries.serious  || []).some(s => s.desc || (s.complications||[]).length);
-  const strainCount = injuries.strainCount ?? 0;
+  const has = (tier) => (injuries[tier] || []).some(s => s.desc || (s.complications||[]).length > 0);
 
-  if (lethal)          return { word: "Lethal",   color: "#2563eb" };
-  if (critical)        return { word: "Critical", color: "#9333ea" };
-  if (serious)         return { word: "Wounded",  color: "#d97706" };
-  if (strainCount > 0) return { word: "Strained", color: "#16a34a" };
-  return null;
+  if (has("lethal"))   return { word: "Lethal",   color: COLORS.lethal };
+  if (has("critical")) return { word: "Critical", color: COLORS.critical };
+  if (has("serious"))  return { word: "Wounded",  color: COLORS.serious };
+  if ((injuries.strainCount ?? 0) > 0) return { word: "Strained", color: COLORS.strain };
+  return null; // healthy — no label
 }
 
 function strainPips(injuries) {
@@ -33,99 +38,114 @@ function strainPips(injuries) {
   return "●".repeat(count) + "○".repeat(Math.max(0, max - count));
 }
 
-function labelText(injuries) {
+function getLabelText(injuries) {
   if (!injuries) return null;
   if (injuries.dead) return "☠ Dead";
   const status = getStatus(injuries);
   if (!status) return null;
+
   const strainCount = injuries.strainCount ?? 0;
-  const hasSevere = (injuries.lethal||[]).some(s=>s.desc||(s.complications||[]).length)
-    || (injuries.critical||[]).some(s=>s.desc||(s.complications||[]).length)
-    || (injuries.serious||[]).some(s=>s.desc||(s.complications||[]).length);
+  const hasSevere = ["lethal","critical","serious"].some(
+    t => (injuries[t]||[]).some(s => s.desc || (s.complications||[]).length > 0)
+  );
   const pips = strainPips(injuries);
+
   if (hasSevere && strainCount > 0) return `${status.word}  ${pips}`;
   if (hasSevere) return status.word;
-  return pips; // strain only — show pips
+  return pips;
 }
 
-// ── Label management ───────────────────────────────────────────────────
-
-async function upsertLabel(token, allItems) {
-  const injuries = token.metadata?.[EXT_KEY];
-  const text = labelText(injuries);
-  const status = getStatus(injuries);
-
-  const existing = allItems.find(
-    i => i.attachedTo === token.id && i.metadata?.[`${EXT_ID}/is-label`]
-  );
-
-  if (!text) {
-    if (existing) await OBR.scene.items.deleteItems([existing.id]);
-    return;
-  }
-
-  if (existing) {
-    await OBR.scene.items.updateItems([existing.id], items => {
-      for (const item of items) {
-        item.text.plainText = text;
-        item.style.fillColor = status.color;
-      }
-    });
-  } else {
-    const label = buildLabel()
-      .plainText(text)
-      .attachedTo(token.id)
-      .layer("TEXT")
-      .locked(true)
-      .position({ x: token.position.x, y: token.position.y + 70 })
-      .style({
-        fillColor: status.color,
-        fillOpacity: 0.9,
-        strokeColor: "#000000",
-        strokeOpacity: 0.4,
-        strokeWidth: 1,
-        cornerRadius: 4,
-        pointerWidth: 0,
-        pointerHeight: 0,
-        backgroundOpacity: 0,
-        backgroundColor: "#000000",
-      })
-      .textStyle({
-        fillColor: "#ffffff",
-        fontFamily: "Segoe UI",
-        fontSize: 18,
-        fontWeight: 700,
-        textAlign: "CENTER",
-        textAlignVertical: "MIDDLE",
-        padding: 6,
-      })
-      .build();
-
-    label.metadata[`${EXT_ID}/is-label`] = true;
-    label.metadata[`${EXT_ID}/token-id`] = token.id;
-
-    await OBR.scene.items.addItems([label]);
-  }
-}
-
+// ── Label sync ────────────────────────────────────────────────────────
 async function syncAllLabels(items) {
+  // Separate tokens with injury data from existing labels
   const tokens = items.filter(i => i.layer === "CHARACTER" && i.metadata?.[EXT_KEY]);
+  const labels = items.filter(i => i.metadata?.[`${EXT_ID}/is-label`] === true);
+  const labelByToken = new Map(labels.map(l => [l.metadata[`${EXT_ID}/token-id`], l]));
+
   for (const token of tokens) {
-    await upsertLabel(token, items);
+    const injuries = token.metadata[EXT_KEY];
+    const text = getLabelText(injuries);
+    const status = getStatus(injuries);
+    const existing = labelByToken.get(token.id);
+
+    if (!text) {
+      // Token is healthy — remove label if exists
+      if (existing) {
+        await OBR.scene.items.deleteItems([existing.id]);
+        labelByToken.delete(token.id);
+      }
+      continue;
+    }
+
+    if (existing) {
+      // Update text and color only if changed
+      const needsUpdate = existing.text?.plainText !== text
+        || existing.style?.fillColor !== status.color;
+      if (needsUpdate) {
+        await OBR.scene.items.updateItems([existing.id], items => {
+          for (const item of items) {
+            item.text.plainText = text;
+            item.style.fillColor = status.color;
+          }
+        });
+      }
+    } else {
+      // Create new label, offset below the token in grid units
+      const gridDpi = await OBR.scene.grid.getDpi();
+      const offset = gridDpi * 0.65; // ~65% of one grid square below center
+
+      const label = buildLabel()
+        .plainText(text)
+        .attachedTo(token.id)
+        .layer("TEXT")
+        .locked(true)
+        .visible(token.visible)
+        .position({
+          x: token.position.x,
+          y: token.position.y + offset,
+        })
+        .style({
+          fillColor: status.color,
+          fillOpacity: 0.9,
+          strokeColor: "#000000",
+          strokeOpacity: 0.5,
+          strokeWidth: 2,
+          cornerRadius: 6,
+          pointerWidth: 0,
+          pointerHeight: 0,
+          backgroundOpacity: 0,
+          backgroundColor: "#000000",
+        })
+        .textStyle({
+          fillColor: "#ffffff",
+          fontFamily: "Segoe UI",
+          fontSize: 22,
+          fontWeight: 700,
+          textAlign: "CENTER",
+          textAlignVertical: "MIDDLE",
+          padding: 8,
+        })
+        .build();
+
+      label.metadata[`${EXT_ID}/is-label`] = true;
+      label.metadata[`${EXT_ID}/token-id`] = token.id;
+
+      await OBR.scene.items.addItems([label]);
+    }
   }
-  // Remove orphaned labels
+
+  // Clean up orphaned labels (token was deleted or lost injury data)
   const tokenIds = new Set(tokens.map(t => t.id));
-  const orphans = items.filter(
-    i => i.metadata?.[`${EXT_ID}/is-label`] && !tokenIds.has(i.metadata[`${EXT_ID}/token-id`])
-  );
-  if (orphans.length) await OBR.scene.items.deleteItems(orphans.map(l => l.id));
+  const orphans = labels.filter(l => !tokenIds.has(l.metadata[`${EXT_ID}/token-id`]));
+  if (orphans.length) {
+    await OBR.scene.items.deleteItems(orphans.map(l => l.id));
+  }
 }
 
-// ── OBR init ───────────────────────────────────────────────────────────
-
+// ── OBR init ──────────────────────────────────────────────────────────
 OBR.onReady(async () => {
 
-  // Right-click CHARACTER token → open injury popover
+  // Right-click CHARACTER token → open injury tracker
   OBR.contextMenu.create({
     id: `${EXT_ID}/context-menu`,
     icons: [{
@@ -146,7 +166,7 @@ OBR.onReady(async () => {
     },
   });
 
-  // Right-click label → also opens the popover
+  // Click/right-click the status label → open injury tracker for that token
   OBR.contextMenu.create({
     id: `${EXT_ID}/label-menu`,
     icons: [{
@@ -168,9 +188,11 @@ OBR.onReady(async () => {
     },
   });
 
-  // Initial sync + live watch
+  // Initial sync
   const items = await OBR.scene.items.getItems();
   await syncAllLabels(items);
+
+  // Watch for any item changes
   OBR.scene.items.onChange(syncAllLabels);
 });
 </script>
