@@ -3,33 +3,175 @@
 <head><title>Injury Tracker Background</title></head>
 <body>
 <script type="module">
-import OBR from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2.2.0/+esm";
+import OBR, { buildLabel } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2.2.0/+esm";
 
-const EXT_ID = "com.injury-tracker";
+const EXT_ID  = "com.injury-tracker";
+const EXT_KEY = "com.injury-tracker/injuries";
 const BASE_URL = "https://p-lange.github.io/injury-tracker";
 
-OBR.onReady(() => {
+// ── Status helpers ─────────────────────────────────────────────────────
+
+function getStatus(injuries) {
+  if (!injuries) return null;
+  if (injuries.dead) return { word: "☠ Dead", color: "#dc2626" };
+
+  const lethal   = (injuries.lethal   || []).some(s => s.desc || (s.complications||[]).length);
+  const critical = (injuries.critical || []).some(s => s.desc || (s.complications||[]).length);
+  const serious  = (injuries.serious  || []).some(s => s.desc || (s.complications||[]).length);
+  const strainCount = injuries.strainCount ?? 0;
+
+  if (lethal)          return { word: "Lethal",   color: "#2563eb" };
+  if (critical)        return { word: "Critical", color: "#9333ea" };
+  if (serious)         return { word: "Wounded",  color: "#d97706" };
+  if (strainCount > 0) return { word: "Strained", color: "#16a34a" };
+  return null;
+}
+
+function strainPips(injuries) {
+  const count = injuries?.strainCount ?? 0;
+  const max   = injuries?.strainMax   ?? 3;
+  return "●".repeat(count) + "○".repeat(Math.max(0, max - count));
+}
+
+function labelText(injuries) {
+  if (!injuries) return null;
+  if (injuries.dead) return "☠ Dead";
+  const status = getStatus(injuries);
+  if (!status) return null;
+  const strainCount = injuries.strainCount ?? 0;
+  const hasSevere = (injuries.lethal||[]).some(s=>s.desc||(s.complications||[]).length)
+    || (injuries.critical||[]).some(s=>s.desc||(s.complications||[]).length)
+    || (injuries.serious||[]).some(s=>s.desc||(s.complications||[]).length);
+  const pips = strainPips(injuries);
+  if (hasSevere && strainCount > 0) return `${status.word}  ${pips}`;
+  if (hasSevere) return status.word;
+  return pips; // strain only — show pips
+}
+
+// ── Label management ───────────────────────────────────────────────────
+
+async function upsertLabel(token, allItems) {
+  const injuries = token.metadata?.[EXT_KEY];
+  const text = labelText(injuries);
+  const status = getStatus(injuries);
+
+  const existing = allItems.find(
+    i => i.attachedTo === token.id && i.metadata?.[`${EXT_ID}/is-label`]
+  );
+
+  if (!text) {
+    if (existing) await OBR.scene.items.deleteItems([existing.id]);
+    return;
+  }
+
+  if (existing) {
+    await OBR.scene.items.updateItems([existing.id], items => {
+      for (const item of items) {
+        item.text.plainText = text;
+        item.style.fillColor = status.color;
+      }
+    });
+  } else {
+    const label = buildLabel()
+      .plainText(text)
+      .attachedTo(token.id)
+      .layer("TEXT")
+      .locked(true)
+      .position({ x: token.position.x, y: token.position.y + 70 })
+      .style({
+        fillColor: status.color,
+        fillOpacity: 0.9,
+        strokeColor: "#000000",
+        strokeOpacity: 0.4,
+        strokeWidth: 1,
+        cornerRadius: 4,
+        pointerWidth: 0,
+        pointerHeight: 0,
+        backgroundOpacity: 0,
+        backgroundColor: "#000000",
+      })
+      .textStyle({
+        fillColor: "#ffffff",
+        fontFamily: "Segoe UI",
+        fontSize: 18,
+        fontWeight: 700,
+        textAlign: "CENTER",
+        textAlignVertical: "MIDDLE",
+        padding: 6,
+      })
+      .build();
+
+    label.metadata[`${EXT_ID}/is-label`] = true;
+    label.metadata[`${EXT_ID}/token-id`] = token.id;
+
+    await OBR.scene.items.addItems([label]);
+  }
+}
+
+async function syncAllLabels(items) {
+  const tokens = items.filter(i => i.layer === "CHARACTER" && i.metadata?.[EXT_KEY]);
+  for (const token of tokens) {
+    await upsertLabel(token, items);
+  }
+  // Remove orphaned labels
+  const tokenIds = new Set(tokens.map(t => t.id));
+  const orphans = items.filter(
+    i => i.metadata?.[`${EXT_ID}/is-label`] && !tokenIds.has(i.metadata[`${EXT_ID}/token-id`])
+  );
+  if (orphans.length) await OBR.scene.items.deleteItems(orphans.map(l => l.id));
+}
+
+// ── OBR init ───────────────────────────────────────────────────────────
+
+OBR.onReady(async () => {
+
+  // Right-click CHARACTER token → open injury popover
   OBR.contextMenu.create({
     id: `${EXT_ID}/context-menu`,
-    icons: [
-      {
-        icon: `${BASE_URL}/icon.svg`,
-        label: "Injuries",
-      },
-    ],
+    icons: [{
+      icon: `${BASE_URL}/icon.svg`,
+      label: "Injuries",
+      filter: { every: [{ key: "layer", value: "CHARACTER" }] },
+    }],
     async onClick(context, elementId) {
       const tokenId = context.items[0]?.id;
       if (!tokenId) return;
-
       OBR.popover.open({
         id: `${EXT_ID}/popover`,
         url: `${BASE_URL}/popover.html?tokenId=${encodeURIComponent(tokenId)}`,
-        height: 540,
+        height: 500,
         width: 420,
         anchorElementId: elementId,
       });
     },
   });
+
+  // Right-click label → also opens the popover
+  OBR.contextMenu.create({
+    id: `${EXT_ID}/label-menu`,
+    icons: [{
+      icon: `${BASE_URL}/icon.svg`,
+      label: "View Injuries",
+      filter: { every: [{ key: ["metadata", `${EXT_ID}/is-label`], value: true }] },
+    }],
+    async onClick(context, elementId) {
+      const label = context.items[0];
+      const tokenId = label?.metadata?.[`${EXT_ID}/token-id`];
+      if (!tokenId) return;
+      OBR.popover.open({
+        id: `${EXT_ID}/popover`,
+        url: `${BASE_URL}/popover.html?tokenId=${encodeURIComponent(tokenId)}`,
+        height: 500,
+        width: 420,
+        anchorElementId: elementId,
+      });
+    },
+  });
+
+  // Initial sync + live watch
+  const items = await OBR.scene.items.getItems();
+  await syncAllLabels(items);
+  OBR.scene.items.onChange(syncAllLabels);
 });
 </script>
 </body>
