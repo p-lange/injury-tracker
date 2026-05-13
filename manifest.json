@@ -1,0 +1,16 @@
+{
+  "name": "Injury Tracker",
+  "version": "1.0.0",
+  "manifest_version": 1,
+  "description": "Track token injuries with severity, complications, and treatment status.",
+  "author": "You",
+  "icon": "/injury-tracker/icon.svg",
+  "background_url": "/injury-tracker/background.html",
+  "action": {
+    "title": "Injury Tracker",
+    "icon": "/injury-tracker/icon.svg",
+    "popover": "/injury-tracker/action.html",
+    "height": 120,
+    "width": 280
+  }
+}
