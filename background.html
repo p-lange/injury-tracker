@@ -3,22 +3,20 @@
 <head><title>Injury Tracker</title></head>
 <body>
 <script type="module">
-import OBR, { buildLabel } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2.2.0/+esm";
+import OBR, { buildText } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2.2.0/+esm";
 
 const EXT_ID  = "com.injury-tracker";
 const EXT_KEY = "com.injury-tracker/injuries";
 const BASE_URL = "https://p-lange.github.io/injury-tracker";
 
-// ── Colors ────────────────────────────────────────────────────────────
 const COLORS = {
   strain:   "#16a34a",
   serious:  "#ca8a04",
   critical: "#ea580c",
   lethal:   "#dc2626",
-  dead:     "#7f1d1d",
+  dead:     "#dc2626",
 };
 
-// ── Status helpers ────────────────────────────────────────────────────
 function getStatus(injuries) {
   if (!injuries) return null;
   if (injuries.dead) return { word: "☠ Dead", color: COLORS.dead };
@@ -38,116 +36,91 @@ function getLabelText(injuries) {
   const sc = injuries.strainCount ?? 0;
   const sm = injuries.strainMax   ?? 3;
   const pips = "●".repeat(sc) + "○".repeat(Math.max(0, sm - sc));
-  const hasSevere = ["lethal", "critical", "serious"].some(
-    t => (injuries[t] || []).some(s => s.desc || (s.complications || []).length > 0)
+  const hasSevere = ["lethal","critical","serious"].some(
+    t => (injuries[t]||[]).some(s => s.desc || (s.complications||[]).length > 0)
   );
-  if (hasSevere && sc > 0) return `${status.word}  ${pips}`;
+  // Single combined string — no overlap possible
+  if (hasSevere && sc > 0) return `${status.word}\n${pips}`;
   if (hasSevere) return status.word;
   return pips;
 }
 
-// ── Label management ──────────────────────────────────────────────────
-// Labels are stored in scene.local (per-viewer overlays, not synced items).
-// The background script rebuilds them from token metadata on every session.
-// We track them by token ID in a local Map so we can update/remove them.
+// ── Local text label management ───────────────────────────────────────
+// buildText lives in scene-space — it scales WITH zoom just like tokens.
+// We use scene.local so the background script owns them (not persisted in scene).
 
-const localLabelIds = new Map(); // tokenId -> labelId
+const localTextIds = new Map(); // tokenId -> textItemId
 
 async function rebuildAllLabels() {
-  // Fetch all scene items to find CHARACTER tokens with injury data
   const allItems = await OBR.scene.items.getItems();
   const tokens = allItems.filter(i => i.layer === "CHARACTER" && i.metadata?.[EXT_KEY]);
   const dpi = await OBR.scene.grid.getDpi();
+  const gridSize = dpi || 150; // one grid square in scene units
 
-  // Clear all existing local labels first, then redraw from scratch
-  const existingIds = [...localLabelIds.values()];
+  // Delete all existing local text items
+  const existingIds = [...localTextIds.values()];
   if (existingIds.length > 0) {
-    await OBR.scene.local.deleteItems(existingIds);
+    try { await OBR.scene.local.deleteItems(existingIds); } catch (_) {}
   }
-  localLabelIds.clear();
+  localTextIds.clear();
 
-  // Rebuild a label for every injured token
-  const labelsToAdd = [];
+  const toAdd = [];
   for (const token of tokens) {
     const injuries = token.metadata[EXT_KEY];
     const text = getLabelText(injuries);
     const status = getStatus(injuries);
     if (!text || !status) continue;
 
-    const offset = (dpi || 150) * 0.65;
+    // Position below the token — offset by half a grid square
+    const yOffset = gridSize * 0.6;
 
-    // buildLabel flat methods (from docs):
-    // Text content:  .plainText(), .width(), .height()
-    // Text style:    .padding(), .fontFamily(), .fontSize(), .fontWeight(),
-    //                .textAlign(), .textAlignVertical(), .fillColor()
-    // Label bubble:  .backgroundColor(), .backgroundOpacity(), .cornerRadius(),
-    //                .pointerWidth(), .pointerHeight(), .pointerDirection()
-    // Generic item:  .position(), .attachedTo(), .layer(), .locked(), .visible()
-    const label = buildLabel()
+    // buildText: scene-space text that scales with zoom.
+    // Docs: OBR.scene.items.addItems([buildText().plainText("x").build()])
+    // We use scene.local so the background script owns it.
+    const item = buildText()
       .plainText(text)
-      .position({ x: token.position.x, y: token.position.y + offset })
+      .position({ x: token.position.x, y: token.position.y + yOffset })
       .attachedTo(token.id)
       .layer("TEXT")
       .locked(true)
       .visible(true)
-      // Text styling (flat methods — no .style({}) wrapper for labels)
-      .fillColor("#ffffff")
-      .fontSize(18)
+      // Text styling
+      .fillColor(status.color)
       .fontWeight(700)
-      .fontFamily("sans-serif")
+      .fontSize(Math.round(gridSize * 0.18)) // ~18% of grid square
       .textAlign("CENTER")
-      .textAlignVertical("MIDDLE")
-      .padding(6)
-      // Label bubble styling (flat methods)
-      .backgroundColor(status.color)
-      .backgroundOpacity(0.9)
-      .cornerRadius(4)
-      .pointerWidth(0)
-      .pointerHeight(0)
+      .textAlignVertical("TOP")
       .build();
 
-    // Store our marker in metadata so we can find it for right-click
-    label.metadata[`${EXT_ID}/is-label`] = true;
-    label.metadata[`${EXT_ID}/token-id`] = token.id;
+    item.metadata[`${EXT_ID}/is-label`] = true;
+    item.metadata[`${EXT_ID}/token-id`] = token.id;
 
-    labelsToAdd.push({ tokenId: token.id, label });
+    toAdd.push({ tokenId: token.id, item });
   }
 
-  if (labelsToAdd.length > 0) {
-    const added = await OBR.scene.local.addItems(labelsToAdd.map(l => l.label));
-    // Map token IDs to their new label IDs for future management
-    // addItems returns the added items in order
+  if (toAdd.length > 0) {
+    const added = await OBR.scene.local.addItems(toAdd.map(e => e.item));
     if (Array.isArray(added)) {
-      added.forEach((item, i) => {
-        localLabelIds.set(labelsToAdd[i].tokenId, item.id);
+      added.forEach((addedItem, i) => {
+        localTextIds.set(toAdd[i].tokenId, addedItem.id);
       });
     }
   }
 }
 
-// ── Scene init (called when scene becomes ready) ──────────────────────
-let unsubscribeItemChange = null;
+let unsubItems = null;
 
 async function initScene() {
-  // Unsubscribe any previous onChange listener before registering a new one
-  if (unsubscribeItemChange) {
-    unsubscribeItemChange();
-    unsubscribeItemChange = null;
-  }
-
-  // Initial label render
+  if (unsubItems) { unsubItems(); unsubItems = null; }
   await rebuildAllLabels();
-
-  // Re-render whenever scene items change (token moved, injury data updated, etc.)
-  unsubscribeItemChange = OBR.scene.items.onChange(async () => {
+  unsubItems = OBR.scene.items.onChange(async () => {
     await rebuildAllLabels();
   });
 }
 
-// ── OBR ready ─────────────────────────────────────────────────────────
 OBR.onReady(async () => {
 
-  // Context menu on CHARACTER tokens → open injury tracker popover
+  // Right-click CHARACTER token
   OBR.contextMenu.create({
     id: `${EXT_ID}/context-menu`,
     icons: [{
@@ -168,7 +141,7 @@ OBR.onReady(async () => {
     },
   });
 
-  // Context menu on injury status labels → open injury tracker for that token
+  // Right-click the injury label itself
   OBR.contextMenu.create({
     id: `${EXT_ID}/label-menu`,
     icons: [{
@@ -190,8 +163,6 @@ OBR.onReady(async () => {
     },
   });
 
-  // Scene ready check — init immediately if a scene is already open,
-  // otherwise wait for onReadyChange
   const sceneReady = await OBR.scene.isReady();
   if (sceneReady) await initScene();
 
@@ -199,12 +170,8 @@ OBR.onReady(async () => {
     if (ready) {
       await initScene();
     } else {
-      // Scene closed — clean up local labels and listener
-      if (unsubscribeItemChange) {
-        unsubscribeItemChange();
-        unsubscribeItemChange = null;
-      }
-      localLabelIds.clear();
+      if (unsubItems) { unsubItems(); unsubItems = null; }
+      localTextIds.clear();
     }
   });
 });
