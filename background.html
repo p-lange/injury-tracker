@@ -39,14 +39,15 @@ function getLabelText(injuries) {
   const hasSevere = ["lethal","critical","serious"].some(
     t => (injuries[t]||[]).some(s => s.desc || (s.complications||[]).length > 0)
   );
-  // Single string — no separate items, no overlap
   if (hasSevere && sc > 0) return `${status.word}  ${pips}`;
   if (hasSevere) return status.word;
   return pips;
 }
 
-// ── Label management ──────────────────────────────────────────────────
-const localLabelIds = new Map(); // tokenId -> labelId
+// Track label IDs by token ID so we can delete them precisely.
+// Critically: we read .id from the built item BEFORE addItems,
+// since addItems returns void (not the added items).
+const localLabelIds = new Map(); // tokenId -> label.id
 
 async function rebuildAllLabels() {
   const allItems = await OBR.scene.items.getItems();
@@ -54,29 +55,25 @@ async function rebuildAllLabels() {
   const dpi = await OBR.scene.grid.getDpi();
   const gridSize = dpi || 150;
 
-  // Wipe existing local labels
-  const existing = [...localLabelIds.values()];
-  if (existing.length) {
-    try { await OBR.scene.local.deleteItems(existing); } catch(_) {}
+  // Delete all previously tracked local labels
+  const existingIds = [...localLabelIds.values()];
+  if (existingIds.length > 0) {
+    try { await OBR.scene.local.deleteItems(existingIds); } catch (_) {}
   }
   localLabelIds.clear();
 
-  const toAdd = [];
+  // Build new labels
+  const labelsToAdd = [];
+
   for (const token of tokens) {
     const injuries = token.metadata[EXT_KEY];
     const text = getLabelText(injuries);
     const status = getStatus(injuries);
     if (!text || !status) continue;
 
-    // Position ABOVE the token — negative Y offset (OBR Y grows downward)
+    // Above the token: negative Y offset (Y increases downward in OBR)
     const yOffset = gridSize * 0.6;
 
-    // LabelBuilder confirmed methods (from docs):
-    // Text:   .plainText() .padding() .fontFamily() .fontSize() .fontWeight()
-    //         .textAlign() .textAlignVertical() .fillColor()
-    // Bubble: .backgroundColor() .backgroundOpacity() .cornerRadius()
-    //         .pointerWidth() .pointerHeight() .pointerDirection()
-    // Item:   .position() .attachedTo() .layer() .locked() .visible()
     const label = buildLabel()
       .plainText(text)
       .position({ x: token.position.x, y: token.position.y - yOffset })
@@ -84,7 +81,7 @@ async function rebuildAllLabels() {
       .layer("TEXT")
       .locked(true)
       .visible(true)
-      // Text style
+      // Text style (flat methods on LabelBuilder)
       .fillColor("#ffffff")
       .fontSize(16)
       .fontWeight(700)
@@ -92,7 +89,7 @@ async function rebuildAllLabels() {
       .textAlign("CENTER")
       .textAlignVertical("MIDDLE")
       .padding(6)
-      // Bubble style
+      // Bubble style (flat methods on LabelBuilder)
       .backgroundColor(status.color)
       .backgroundOpacity(0.9)
       .cornerRadius(4)
@@ -100,19 +97,16 @@ async function rebuildAllLabels() {
       .pointerHeight(0)
       .build();
 
-    // Allow right-click on label, but not block clicks through to the token
-    label.disableHit = false;
     label.metadata[`${EXT_ID}/is-label`] = true;
     label.metadata[`${EXT_ID}/token-id`] = token.id;
 
-    toAdd.push({ tokenId: token.id, label });
+    // Read the ID NOW — addItems returns void, not the created items
+    localLabelIds.set(token.id, label.id);
+    labelsToAdd.push(label);
   }
 
-  if (toAdd.length) {
-    const added = await OBR.scene.local.addItems(toAdd.map(e => e.label));
-    if (Array.isArray(added)) {
-      added.forEach((item, i) => localLabelIds.set(toAdd[i].tokenId, item.id));
-    }
+  if (labelsToAdd.length > 0) {
+    await OBR.scene.local.addItems(labelsToAdd);
   }
 }
 
@@ -128,7 +122,6 @@ async function initScene() {
 
 OBR.onReady(async () => {
 
-  // Right-click CHARACTER token → open popover
   OBR.contextMenu.create({
     id: `${EXT_ID}/context-menu`,
     icons: [{
@@ -149,7 +142,6 @@ OBR.onReady(async () => {
     },
   });
 
-  // Right-click injury label → open popover for that token
   OBR.contextMenu.create({
     id: `${EXT_ID}/label-menu`,
     icons: [{
