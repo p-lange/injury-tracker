@@ -2,30 +2,14 @@
 <html>
 <head><title>Injury Tracker</title></head>
 <body>
-<div id="log" style="font-size:11px;font-family:monospace;padding:4px;color:#ccc;background:#111;max-height:200px;overflow:auto"></div>
 <script type="module">
-const log = (msg, err) => {
-  const el = document.getElementById("log");
-  if (el) el.innerHTML += `<div style="color:${err?'#f87':'#8f8'}">${msg}</div>`;
-  console[err ? "error" : "log"]("[InjuryTracker]", msg);
-};
-
-log("Loading SDK...");
-
-let OBR, buildLabel;
-try {
-  const sdk = await import("https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2.2.0/+esm");
-  OBR = sdk.default;
-  buildLabel = sdk.buildLabel;
-  log("SDK loaded. buildLabel=" + typeof buildLabel);
-} catch(e) {
-  log("SDK load failed: " + e.message, true);
-}
+import OBR, { buildLabel } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2.2.0/+esm";
 
 const EXT_ID  = "com.injury-tracker";
 const EXT_KEY = "com.injury-tracker/injuries";
 const BASE_URL = "https://p-lange.github.io/injury-tracker";
 
+// ── Colors ────────────────────────────────────────────────────────────
 const COLORS = {
   strain:   "#16a34a",
   serious:  "#ca8a04",
@@ -34,13 +18,14 @@ const COLORS = {
   dead:     "#7f1d1d",
 };
 
+// ── Status helpers ────────────────────────────────────────────────────
 function getStatus(injuries) {
   if (!injuries) return null;
   if (injuries.dead) return { word: "☠ Dead", color: COLORS.dead };
-  const has = (t) => (injuries[t]||[]).some(s => s.desc || (s.complications||[]).length > 0);
-  if (has("lethal"))   return { word: "Lethal",   color: COLORS.lethal };
-  if (has("critical")) return { word: "Critical", color: COLORS.critical };
-  if (has("serious"))  return { word: "Wounded",  color: COLORS.serious };
+  const has = (t) => (injuries[t] || []).some(s => s.desc || (s.complications || []).length > 0);
+  if (has("lethal"))                   return { word: "Lethal",   color: COLORS.lethal };
+  if (has("critical"))                 return { word: "Critical", color: COLORS.critical };
+  if (has("serious"))                  return { word: "Wounded",  color: COLORS.serious };
   if ((injuries.strainCount ?? 0) > 0) return { word: "Strained", color: COLORS.strain };
   return null;
 }
@@ -53,188 +38,175 @@ function getLabelText(injuries) {
   const sc = injuries.strainCount ?? 0;
   const sm = injuries.strainMax   ?? 3;
   const pips = "●".repeat(sc) + "○".repeat(Math.max(0, sm - sc));
-  const hasSevere = ["lethal","critical","serious"].some(
-    t => (injuries[t]||[]).some(s => s.desc || (s.complications||[]).length > 0)
+  const hasSevere = ["lethal", "critical", "serious"].some(
+    t => (injuries[t] || []).some(s => s.desc || (s.complications || []).length > 0)
   );
   if (hasSevere && sc > 0) return `${status.word}  ${pips}`;
   if (hasSevere) return status.word;
   return pips;
 }
 
-// ── Label management using scene.items (persistent, synced) ────────────
-async function upsertLabel(token, allItems) {
-  try {
-    const injuries = token.metadata?.[EXT_KEY];
+// ── Label management ──────────────────────────────────────────────────
+// Labels are stored in scene.local (per-viewer overlays, not synced items).
+// The background script rebuilds them from token metadata on every session.
+// We track them by token ID in a local Map so we can update/remove them.
+
+const localLabelIds = new Map(); // tokenId -> labelId
+
+async function rebuildAllLabels() {
+  // Fetch all scene items to find CHARACTER tokens with injury data
+  const allItems = await OBR.scene.items.getItems();
+  const tokens = allItems.filter(i => i.layer === "CHARACTER" && i.metadata?.[EXT_KEY]);
+  const dpi = await OBR.scene.grid.getDpi();
+
+  // Clear all existing local labels first, then redraw from scratch
+  const existingIds = [...localLabelIds.values()];
+  if (existingIds.length > 0) {
+    await OBR.scene.local.deleteItems(existingIds);
+  }
+  localLabelIds.clear();
+
+  // Rebuild a label for every injured token
+  const labelsToAdd = [];
+  for (const token of tokens) {
+    const injuries = token.metadata[EXT_KEY];
     const text = getLabelText(injuries);
     const status = getStatus(injuries);
+    if (!text || !status) continue;
 
-    const existing = allItems.find(
-      i => i.attachedTo === token.id && i.metadata?.[`${EXT_ID}/is-label`] === true
-    );
+    const offset = (dpi || 150) * 0.65;
 
-    if (!text) {
-      if (existing) {
-        log(`Removing label for ${token.name}`);
-        await OBR.scene.items.deleteItems([existing.id]);
-      }
-      return;
-    }
+    // buildLabel flat methods (from docs):
+    // Text content:  .plainText(), .width(), .height()
+    // Text style:    .padding(), .fontFamily(), .fontSize(), .fontWeight(),
+    //                .textAlign(), .textAlignVertical(), .fillColor()
+    // Label bubble:  .backgroundColor(), .backgroundOpacity(), .cornerRadius(),
+    //                .pointerWidth(), .pointerHeight(), .pointerDirection()
+    // Generic item:  .position(), .attachedTo(), .layer(), .locked(), .visible()
+    const label = buildLabel()
+      .plainText(text)
+      .position({ x: token.position.x, y: token.position.y + offset })
+      .attachedTo(token.id)
+      .layer("TEXT")
+      .locked(true)
+      .visible(true)
+      // Text styling (flat methods — no .style({}) wrapper for labels)
+      .fillColor("#ffffff")
+      .fontSize(18)
+      .fontWeight(700)
+      .fontFamily("sans-serif")
+      .textAlign("CENTER")
+      .textAlignVertical("MIDDLE")
+      .padding(6)
+      // Label bubble styling (flat methods)
+      .backgroundColor(status.color)
+      .backgroundOpacity(0.9)
+      .cornerRadius(4)
+      .pointerWidth(0)
+      .pointerHeight(0)
+      .build();
 
-    if (existing) {
-      // Only update if something changed
-      if (existing.text?.plainText === text && existing.style?.fillColor === status.color) return;
-      log(`Updating label for ${token.name}: "${text}"`);
-      await OBR.scene.items.updateItems([existing.id], items => {
-        for (const item of items) {
-          item.text.plainText = text;
-          item.style.fillColor = status.color;
-        }
+    // Store our marker in metadata so we can find it for right-click
+    label.metadata[`${EXT_ID}/is-label`] = true;
+    label.metadata[`${EXT_ID}/token-id`] = token.id;
+
+    labelsToAdd.push({ tokenId: token.id, label });
+  }
+
+  if (labelsToAdd.length > 0) {
+    const added = await OBR.scene.local.addItems(labelsToAdd.map(l => l.label));
+    // Map token IDs to their new label IDs for future management
+    // addItems returns the added items in order
+    if (Array.isArray(added)) {
+      added.forEach((item, i) => {
+        localLabelIds.set(labelsToAdd[i].tokenId, item.id);
       });
-    } else {
-      log(`Creating label for ${token.name}: "${text}"`);
-      const dpi = await OBR.scene.grid.getDpi();
-      const offset = (dpi || 150) * 0.7;
-
-      const label = buildLabel()
-        .plainText(text)
-        .position({ x: token.position.x, y: token.position.y + offset })
-        .attachedTo(token.id)
-        .layer("TEXT")
-        .locked(true)
-        .visible(true)
-        // Label bubble style
-        .style({
-          fillColor: status.color,
-          fillOpacity: 0.9,
-          strokeColor: "#000000",
-          strokeOpacity: 0.5,
-          strokeWidth: 1,
-          cornerRadius: 5,
-          pointerWidth: 0,
-          pointerHeight: 0,
-          backgroundOpacity: 0,
-          backgroundColor: "#000000",
-        })
-        // Text style — flat methods directly on label builder
-        .fillColor("#ffffff")
-        .fontFamily("sans-serif")
-        .fontSize(20)
-        .fontWeight(700)
-        .textAlign("CENTER")
-        .textAlignVertical("MIDDLE")
-        .padding(6)
-        .build();
-
-      label.metadata[`${EXT_ID}/is-label`] = true;
-      label.metadata[`${EXT_ID}/token-id`] = token.id;
-
-      await OBR.scene.items.addItems([label]);
-      log(`Label created for ${token.name}`);
     }
-  } catch(e) {
-    log(`upsertLabel error: ${e.message}`, true);
   }
 }
 
-async function syncAllLabels(items) {
-  try {
-    const tokens = items.filter(i => i.layer === "CHARACTER" && i.metadata?.[EXT_KEY]);
-    const labels  = items.filter(i => i.metadata?.[`${EXT_ID}/is-label`] === true);
+// ── Scene init (called when scene becomes ready) ──────────────────────
+let unsubscribeItemChange = null;
 
-    for (const token of tokens) {
-      await upsertLabel(token, items);
-    }
-
-    // Orphan cleanup
-    const tokenIds = new Set(tokens.map(t => t.id));
-    const orphans = labels.filter(l => !tokenIds.has(l.metadata[`${EXT_ID}/token-id`]));
-    if (orphans.length) {
-      log(`Removing ${orphans.length} orphaned labels`);
-      await OBR.scene.items.deleteItems(orphans.map(l => l.id));
-    }
-  } catch(e) {
-    log(`syncAllLabels error: ${e.message}`, true);
+async function initScene() {
+  // Unsubscribe any previous onChange listener before registering a new one
+  if (unsubscribeItemChange) {
+    unsubscribeItemChange();
+    unsubscribeItemChange = null;
   }
+
+  // Initial label render
+  await rebuildAllLabels();
+
+  // Re-render whenever scene items change (token moved, injury data updated, etc.)
+  unsubscribeItemChange = OBR.scene.items.onChange(async () => {
+    await rebuildAllLabels();
+  });
 }
 
+// ── OBR ready ─────────────────────────────────────────────────────────
 OBR.onReady(async () => {
-  log("OBR ready!");
 
-  try {
-    OBR.contextMenu.create({
-      id: `${EXT_ID}/context-menu`,
-      icons: [{
-        icon: `${BASE_URL}/icon.svg`,
-        label: "Injuries",
-        filter: { every: [{ key: "layer", value: "CHARACTER" }] },
-      }],
-      async onClick(context, elementId) {
-        const tokenId = context.items[0]?.id;
-        if (!tokenId) return;
-        OBR.popover.open({
-          id: `${EXT_ID}/popover`,
-          url: `${BASE_URL}/popover.html?tokenId=${encodeURIComponent(tokenId)}`,
-          height: 500,
-          width: 420,
-          anchorElementId: elementId,
-        });
-      },
-    });
-    log("Context menu registered");
-  } catch(e) {
-    log("Context menu failed: " + e.message, true);
-  }
+  // Context menu on CHARACTER tokens → open injury tracker popover
+  OBR.contextMenu.create({
+    id: `${EXT_ID}/context-menu`,
+    icons: [{
+      icon: `${BASE_URL}/icon.svg`,
+      label: "Injuries",
+      filter: { every: [{ key: "layer", value: "CHARACTER" }] },
+    }],
+    async onClick(context, elementId) {
+      const tokenId = context.items[0]?.id;
+      if (!tokenId) return;
+      OBR.popover.open({
+        id: `${EXT_ID}/popover`,
+        url: `${BASE_URL}/popover.html?tokenId=${encodeURIComponent(tokenId)}`,
+        height: 500,
+        width: 420,
+        anchorElementId: elementId,
+      });
+    },
+  });
 
-  try {
-    OBR.contextMenu.create({
-      id: `${EXT_ID}/label-menu`,
-      icons: [{
-        icon: `${BASE_URL}/icon.svg`,
-        label: "View Injuries",
-        filter: { every: [{ key: ["metadata", `${EXT_ID}/is-label`], value: true }] },
-      }],
-      async onClick(context, elementId) {
-        const label = context.items[0];
-        const tokenId = label?.metadata?.[`${EXT_ID}/token-id`];
-        if (!tokenId) return;
-        OBR.popover.open({
-          id: `${EXT_ID}/popover`,
-          url: `${BASE_URL}/popover.html?tokenId=${encodeURIComponent(tokenId)}`,
-          height: 500,
-          width: 420,
-          anchorElementId: elementId,
-        });
-      },
-    });
-    log("Label context menu registered");
-  } catch(e) {
-    log("Label menu failed: " + e.message, true);
-  }
+  // Context menu on injury status labels → open injury tracker for that token
+  OBR.contextMenu.create({
+    id: `${EXT_ID}/label-menu`,
+    icons: [{
+      icon: `${BASE_URL}/icon.svg`,
+      label: "View Injuries",
+      filter: { every: [{ key: ["metadata", `${EXT_ID}/is-label`], value: true }] },
+    }],
+    async onClick(context, elementId) {
+      const label = context.items[0];
+      const tokenId = label?.metadata?.[`${EXT_ID}/token-id`];
+      if (!tokenId) return;
+      OBR.popover.open({
+        id: `${EXT_ID}/popover`,
+        url: `${BASE_URL}/popover.html?tokenId=${encodeURIComponent(tokenId)}`,
+        height: 500,
+        width: 420,
+        anchorElementId: elementId,
+      });
+    },
+  });
 
-  async function initScene() {
-    try {
-      const items = await OBR.scene.items.getItems();
-      log(`Scene has ${items.length} items`);
-      await syncAllLabels(items);
-      OBR.scene.items.onChange(syncAllLabels);
-      log("onChange registered");
-    } catch(e) {
-      log("initScene failed: " + e.message, true);
+  // Scene ready check — init immediately if a scene is already open,
+  // otherwise wait for onReadyChange
+  const sceneReady = await OBR.scene.isReady();
+  if (sceneReady) await initScene();
+
+  OBR.scene.onReadyChange(async (ready) => {
+    if (ready) {
+      await initScene();
+    } else {
+      // Scene closed — clean up local labels and listener
+      if (unsubscribeItemChange) {
+        unsubscribeItemChange();
+        unsubscribeItemChange = null;
+      }
+      localLabelIds.clear();
     }
-  }
-
-  try {
-    const sceneReady = await OBR.scene.isReady();
-    log("Scene already ready: " + sceneReady);
-    if (sceneReady) await initScene();
-
-    OBR.scene.onReadyChange(async (ready) => {
-      log("Scene ready changed: " + ready);
-      if (ready) await initScene();
-    });
-  } catch(e) {
-    log("Scene ready check failed: " + e.message, true);
-  }
+  });
 });
 </script>
 </body>
