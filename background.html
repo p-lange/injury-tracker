@@ -211,14 +211,29 @@ OBR.onReady(async () => {
     log("Label menu failed: " + e.message, true);
   }
 
+  async function initScene() {
+    try {
+      const items = await OBR.scene.items.getItems();
+      log(`Scene has ${items.length} items`);
+      await syncAllLabels(items);
+      OBR.scene.items.onChange(syncAllLabels);
+      log("onChange registered");
+    } catch(e) {
+      log("initScene failed: " + e.message, true);
+    }
+  }
+
   try {
-    const items = await OBR.scene.items.getItems();
-    log(`Scene has ${items.length} items`);
-    await syncAllLabels(items);
-    OBR.scene.items.onChange(syncAllLabels);
-    log("onChange registered");
+    const sceneReady = await OBR.scene.isReady();
+    log("Scene already ready: " + sceneReady);
+    if (sceneReady) await initScene();
+
+    OBR.scene.onReadyChange(async (ready) => {
+      log("Scene ready changed: " + ready);
+      if (ready) await initScene();
+    });
   } catch(e) {
-    log("Scene init failed: " + e.message, true);
+    log("Scene ready check failed: " + e.message, true);
   }
 });
 </script>
