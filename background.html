@@ -102,6 +102,7 @@ async function upsertLabel(token, allItems) {
         .layer("TEXT")
         .locked(true)
         .visible(true)
+        // Label bubble style
         .style({
           fillColor: status.color,
           fillOpacity: 0.9,
@@ -114,15 +115,14 @@ async function upsertLabel(token, allItems) {
           backgroundOpacity: 0,
           backgroundColor: "#000000",
         })
-        .textStyle({
-          fillColor: "#ffffff",
-          fontFamily: "sans-serif",
-          fontSize: 20,
-          fontWeight: 700,
-          textAlign: "CENTER",
-          textAlignVertical: "MIDDLE",
-          padding: 6,
-        })
+        // Text style — flat methods directly on label builder
+        .fillColor("#ffffff")
+        .fontFamily("sans-serif")
+        .fontSize(20)
+        .fontWeight(700)
+        .textAlign("CENTER")
+        .textAlignVertical("MIDDLE")
+        .padding(6)
         .build();
 
       label.metadata[`${EXT_ID}/is-label`] = true;
