@@ -3,7 +3,7 @@
 <head><title>Injury Tracker</title></head>
 <body>
 <script type="module">
-import OBR, { buildText } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2.2.0/+esm";
+import OBR, { buildLabel } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2.2.0/+esm";
 
 const EXT_ID  = "com.injury-tracker";
 const EXT_KEY = "com.injury-tracker/injuries";
@@ -14,7 +14,7 @@ const COLORS = {
   serious:  "#ca8a04",
   critical: "#ea580c",
   lethal:   "#dc2626",
-  dead:     "#dc2626",
+  dead:     "#7f1d1d",
 };
 
 function getStatus(injuries) {
@@ -39,30 +39,27 @@ function getLabelText(injuries) {
   const hasSevere = ["lethal","critical","serious"].some(
     t => (injuries[t]||[]).some(s => s.desc || (s.complications||[]).length > 0)
   );
-  // Single combined string — no overlap possible
-  if (hasSevere && sc > 0) return `${status.word}\n${pips}`;
+  // Single string — no separate items, no overlap
+  if (hasSevere && sc > 0) return `${status.word}  ${pips}`;
   if (hasSevere) return status.word;
   return pips;
 }
 
-// ── Local text label management ───────────────────────────────────────
-// buildText lives in scene-space — it scales WITH zoom just like tokens.
-// We use scene.local so the background script owns them (not persisted in scene).
-
-const localTextIds = new Map(); // tokenId -> textItemId
+// ── Label management ──────────────────────────────────────────────────
+const localLabelIds = new Map(); // tokenId -> labelId
 
 async function rebuildAllLabels() {
   const allItems = await OBR.scene.items.getItems();
   const tokens = allItems.filter(i => i.layer === "CHARACTER" && i.metadata?.[EXT_KEY]);
   const dpi = await OBR.scene.grid.getDpi();
-  const gridSize = dpi || 150; // one grid square in scene units
+  const gridSize = dpi || 150;
 
-  // Delete all existing local text items
-  const existingIds = [...localTextIds.values()];
-  if (existingIds.length > 0) {
-    try { await OBR.scene.local.deleteItems(existingIds); } catch (_) {}
+  // Wipe existing local labels
+  const existing = [...localLabelIds.values()];
+  if (existing.length) {
+    try { await OBR.scene.local.deleteItems(existing); } catch(_) {}
   }
-  localTextIds.clear();
+  localLabelIds.clear();
 
   const toAdd = [];
   for (const token of tokens) {
@@ -71,39 +68,50 @@ async function rebuildAllLabels() {
     const status = getStatus(injuries);
     if (!text || !status) continue;
 
-    // Position below the token — offset by half a grid square
+    // Position ABOVE the token — negative Y offset (OBR Y grows downward)
     const yOffset = gridSize * 0.6;
 
-    // buildText: scene-space text that scales with zoom.
-    // Docs: OBR.scene.items.addItems([buildText().plainText("x").build()])
-    // We use scene.local so the background script owns it.
-    const item = buildText()
+    // LabelBuilder confirmed methods (from docs):
+    // Text:   .plainText() .padding() .fontFamily() .fontSize() .fontWeight()
+    //         .textAlign() .textAlignVertical() .fillColor()
+    // Bubble: .backgroundColor() .backgroundOpacity() .cornerRadius()
+    //         .pointerWidth() .pointerHeight() .pointerDirection()
+    // Item:   .position() .attachedTo() .layer() .locked() .visible()
+    const label = buildLabel()
       .plainText(text)
-      .position({ x: token.position.x, y: token.position.y + yOffset })
+      .position({ x: token.position.x, y: token.position.y - yOffset })
       .attachedTo(token.id)
       .layer("TEXT")
       .locked(true)
       .visible(true)
-      // Text styling
-      .fillColor(status.color)
+      // Text style
+      .fillColor("#ffffff")
+      .fontSize(16)
       .fontWeight(700)
-      .fontSize(Math.round(gridSize * 0.18)) // ~18% of grid square
+      .fontFamily("sans-serif")
       .textAlign("CENTER")
-      .textAlignVertical("TOP")
+      .textAlignVertical("MIDDLE")
+      .padding(6)
+      // Bubble style
+      .backgroundColor(status.color)
+      .backgroundOpacity(0.9)
+      .cornerRadius(4)
+      .pointerWidth(0)
+      .pointerHeight(0)
       .build();
 
-    item.metadata[`${EXT_ID}/is-label`] = true;
-    item.metadata[`${EXT_ID}/token-id`] = token.id;
+    // Allow right-click on label, but not block clicks through to the token
+    label.disableHit = false;
+    label.metadata[`${EXT_ID}/is-label`] = true;
+    label.metadata[`${EXT_ID}/token-id`] = token.id;
 
-    toAdd.push({ tokenId: token.id, item });
+    toAdd.push({ tokenId: token.id, label });
   }
 
-  if (toAdd.length > 0) {
-    const added = await OBR.scene.local.addItems(toAdd.map(e => e.item));
+  if (toAdd.length) {
+    const added = await OBR.scene.local.addItems(toAdd.map(e => e.label));
     if (Array.isArray(added)) {
-      added.forEach((addedItem, i) => {
-        localTextIds.set(toAdd[i].tokenId, addedItem.id);
-      });
+      added.forEach((item, i) => localLabelIds.set(toAdd[i].tokenId, item.id));
     }
   }
 }
@@ -120,7 +128,7 @@ async function initScene() {
 
 OBR.onReady(async () => {
 
-  // Right-click CHARACTER token
+  // Right-click CHARACTER token → open popover
   OBR.contextMenu.create({
     id: `${EXT_ID}/context-menu`,
     icons: [{
@@ -141,7 +149,7 @@ OBR.onReady(async () => {
     },
   });
 
-  // Right-click the injury label itself
+  // Right-click injury label → open popover for that token
   OBR.contextMenu.create({
     id: `${EXT_ID}/label-menu`,
     icons: [{
@@ -171,7 +179,7 @@ OBR.onReady(async () => {
       await initScene();
     } else {
       if (unsubItems) { unsubItems(); unsubItems = null; }
-      localTextIds.clear();
+      localLabelIds.clear();
     }
   });
 });
