@@ -1,12 +1,14 @@
 <!DOCTYPE html>
 <html>
-<head><title>Injury Tracker</title></head>
+<head><title>Injury Tracker Background</title></head>
 <body>
 <script type="module">
 import OBR, { buildLabel } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@2.2.0/+esm";
 
 const EXT_ID  = "com.injury-tracker";
 const EXT_KEY = "com.injury-tracker/injuries";
+const LABEL_KEY = "com.injury-tracker/is-label";
+const TOKEN_REF_KEY = "com.injury-tracker/token-id";
 const BASE_URL = "https://p-lange.github.io/injury-tracker";
 
 const COLORS = {
@@ -34,7 +36,7 @@ function getLabelText(injuries) {
   const status = getStatus(injuries);
   if (!status) return null;
   const sc = injuries.strainCount ?? 0;
-  const sm = injuries.strainMax   ?? 3;
+  const sm = injuries.strainMax ?? 3;
   const pips = "●".repeat(sc) + "○".repeat(Math.max(0, sm - sc));
   const hasSevere = ["lethal","critical","serious"].some(
     t => (injuries[t]||[]).some(s => s.desc || (s.complications||[]).length > 0)
@@ -44,69 +46,112 @@ function getLabelText(injuries) {
   return pips;
 }
 
-// Track label IDs by token ID so we can delete them precisely.
-// Critically: we read .id from the built item BEFORE addItems,
-// since addItems returns void (not the added items).
-const localLabelIds = new Map(); // tokenId -> label.id
+// ── Core: sync labels as real scene.items attached to tokens ──────────
+// Labels are stored in the SCENE (not local) so all players see them.
+// They are found by looking for items with our LABEL_KEY metadata.
 
-async function rebuildAllLabels() {
-  const allItems = await OBR.scene.items.getItems();
-  const tokens = allItems.filter(i => i.layer === "CHARACTER" && i.metadata?.[EXT_KEY]);
-  const dpi = await OBR.scene.grid.getDpi();
-  const gridSize = dpi || 150;
+async function syncLabels(allItems) {
+  const tokens = allItems.filter(i => i.layer === "CHARACTER" && i.metadata[EXT_KEY]);
+  const existingLabels = allItems.filter(i => i.metadata[LABEL_KEY] === true);
 
-  // Delete all previously tracked local labels
-  const existingIds = [...localLabelIds.values()];
-  if (existingIds.length > 0) {
-    try { await OBR.scene.local.deleteItems(existingIds); } catch (_) {}
+  // Build lookup: tokenId -> existing label item
+  const labelByToken = {};
+  for (const label of existingLabels) {
+    const tid = label.metadata[TOKEN_REF_KEY];
+    if (tid) labelByToken[tid] = label;
   }
-  localLabelIds.clear();
 
-  // Build new labels
-  const labelsToAdd = [];
+  const toAdd = [];
+  const toUpdate = []; // { id, text, color }
+  const toDelete = [];
+
+  // Figure out what token IDs are active
+  const activeTokenIds = new Set();
 
   for (const token of tokens) {
     const injuries = token.metadata[EXT_KEY];
     const text = getLabelText(injuries);
     const status = getStatus(injuries);
-    if (!text || !status) continue;
+    const existing = labelByToken[token.id];
 
-    // Above the token: negative Y offset (Y increases downward in OBR)
-    const yOffset = gridSize * 0.6;
+    if (!text || !status) {
+      // No injury worth showing — delete label if it exists
+      if (existing) toDelete.push(existing.id);
+      continue;
+    }
 
-    const label = buildLabel()
-      .plainText(text)
-      .position({ x: token.position.x, y: token.position.y - yOffset })
-      .attachedTo(token.id)
-      .layer("TEXT")
-      .locked(true)
-      .visible(true)
-      // Text style (flat methods on LabelBuilder)
-      .fillColor("#ffffff")
-      .fontSize(16)
-      .fontWeight(700)
-      .fontFamily("sans-serif")
-      .textAlign("CENTER")
-      .textAlignVertical("MIDDLE")
-      .padding(6)
-      // Bubble style (flat methods on LabelBuilder)
-      .backgroundColor(status.color)
-      .backgroundOpacity(0.9)
-      .cornerRadius(4)
-      .pointerWidth(0)
-      .pointerHeight(0)
-      .build();
+    activeTokenIds.add(token.id);
 
-    label.metadata[`${EXT_ID}/is-label`] = true;
-    label.metadata[`${EXT_ID}/token-id`] = token.id;
+    if (existing) {
+      // Check if update needed
+      const currentText = existing.text?.plainText;
+      const currentColor = existing.style?.backgroundColor;
+      if (currentText !== text || currentColor !== status.color) {
+        toUpdate.push({ id: existing.id, text, color: status.color });
+      }
+    } else {
+      // Need to create a new label
+      const dpi = await OBR.scene.grid.getDpi();
+      const offset = (dpi || 150) * 0.6;
 
-    // Read the ID NOW — addItems returns void, not the created items
-    localLabelIds.set(token.id, label.id);
-    labelsToAdd.push(label);
+      const label = buildLabel()
+        .plainText(text)
+        .position({ x: token.position.x, y: token.position.y - offset })
+        .attachedTo(token.id)
+        .layer("TEXT")
+        .locked(true)
+        .visible(true)
+        .fillColor("#ffffff")
+        .fontSize(16)
+        .fontWeight(700)
+        .fontFamily("sans-serif")
+        .textAlign("CENTER")
+        .textAlignVertical("MIDDLE")
+        .padding(6)
+        .backgroundColor(status.color)
+        .backgroundOpacity(0.9)
+        .cornerRadius(4)
+        .pointerWidth(0)
+        .pointerHeight(0)
+        .build();
+
+      label.metadata[LABEL_KEY] = true;
+      label.metadata[TOKEN_REF_KEY] = token.id;
+
+      toAdd.push(label);
+    }
   }
 
-  if (labelsToAdd.length > 0) {
-    await OBR.scene.local.addItems(labelsToAdd);
+  // Also delete labels for tokens that no longer exist or have no injuries
+  for (const label of existingLabels) {
+    const tid = label.metadata[TOKEN_REF_KEY];
+    if (!activeTokenIds.has(tid) && !toDelete.includes(label.id)) {
+      toDelete.push(label.id);
+    }
+  }
+
+  // Apply changes
+  if (toDelete.length > 0) {
+    await OBR.scene.items.deleteItems(toDelete);
+  }
+
+  if (toUpdate.length > 0) {
+    await OBR.scene.items.updateItems(
+      toUpdate.map(u => u.id),
+      items => {
+        for (const item of items) {
+          const upd = toUpdate.find(u => u.id === item.id);
+          if (upd) {
+            item.text.plainText = upd.text;
+            item.style.backgroundColor = upd.color;
+          }
+        }
+      }
+    );
+  }
+
+  if (toAdd.length > 0) {
+    await OBR.scene.items.addItems(toAdd);
   }
 }
 
@@ -114,14 +159,14 @@ let unsubItems = null;
 
 async function initScene() {
   if (unsubItems) { unsubItems(); unsubItems = null; }
-  await rebuildAllLabels();
-  unsubItems = OBR.scene.items.onChange(async () => {
-    await rebuildAllLabels();
-  });
+  const items = await OBR.scene.items.getItems();
+  await syncLabels(items);
+  unsubItems = OBR.scene.items.onChange(syncLabels);
 }
 
 OBR.onReady(async () => {
 
+  // Context menu on CHARACTER tokens
   OBR.contextMenu.create({
     id: `${EXT_ID}/context-menu`,
     icons: [{
@@ -142,16 +187,16 @@ OBR.onReady(async () => {
     },
   });
 
+  // Context menu on injury labels
   OBR.contextMenu.create({
     id: `${EXT_ID}/label-menu`,
     icons: [{
       icon: `${BASE_URL}/icon.svg`,
       label: "View Injuries",
-      filter: { every: [{ key: ["metadata", `${EXT_ID}/is-label`], value: true }] },
+      filter: { every: [{ key: ["metadata", LABEL_KEY], value: true }] },
     }],
     async onClick(context, elementId) {
-      const label = context.items[0];
-      const tokenId = label?.metadata?.[`${EXT_ID}/token-id`];
+      const tokenId = context.items[0]?.metadata?.[TOKEN_REF_KEY];
       if (!tokenId) return;
       OBR.popover.open({
         id: `${EXT_ID}/popover`,
@@ -163,15 +208,13 @@ OBR.onReady(async () => {
     },
   });
 
-  const sceneReady = await OBR.scene.isReady();
-  if (sceneReady) await initScene();
+  const ready = await OBR.scene.isReady();
+  if (ready) await initScene();
 
   OBR.scene.onReadyChange(async (ready) => {
-    if (ready) {
-      await initScene();
-    } else {
+    if (ready) await initScene();
+    else {
       if (unsubItems) { unsubItems(); unsubItems = null; }
-      localLabelIds.clear();
     }
   });
 });
