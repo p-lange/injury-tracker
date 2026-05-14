@@ -90,9 +90,12 @@ async function syncLabels(allItems) {
         toUpdate.push({ id: existing.id, text, color: status.color });
       }
     } else {
-      // Need to create a new label
+      // Need to create a new label.
+      // Labels are screen-space: fontSize is px, position is scene units.
+      // Offset half a grid square above the token center.
       const dpi = await OBR.scene.grid.getDpi();
-      const offset = (dpi || 150) * 0.6;
+      const gridSize = dpi || 150;
+      const offset = gridSize * 0.55;
 
       const label = buildLabel()
         .plainText(text)
@@ -102,12 +105,12 @@ async function syncLabels(allItems) {
         .locked(true)
         .visible(true)
         .fillColor("#ffffff")
-        .fontSize(16)
+        .fontSize(14)
         .fontWeight(700)
         .fontFamily("sans-serif")
         .textAlign("CENTER")
         .textAlignVertical("MIDDLE")
-        .padding(6)
+        .padding(4)
         .backgroundColor(status.color)
         .backgroundOpacity(0.9)
         .cornerRadius(4)
